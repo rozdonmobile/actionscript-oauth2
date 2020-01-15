@@ -1,6 +1,7 @@
 package com.adobe.protocols.oauth2
 {
 	import com.adobe.protocols.oauth2.event.GetAccessTokenEvent;
+	import com.adobe.protocols.oauth2.event.GetAuthorizationCodeEvent;
 	import com.adobe.protocols.oauth2.event.RefreshAccessTokenEvent;
 	import com.adobe.protocols.oauth2.grant.AuthorizationCodeGrant;
 	import com.adobe.protocols.oauth2.grant.IGrantType;
@@ -45,7 +46,17 @@ package com.adobe.protocols.oauth2
 	 * @see com.adobe.protocols.oauth2.event.RefreshAccessTokenEvent
 	 */
 	[Event(name="refreshAccessToken", type="com.adobe.protocols.oauth2.event.RefreshAccessTokenEvent")]
-	
+
+	/**
+	 * Event that is broadcast when results from a <code>getAuthorizationCode</code> request are received.
+	 *
+	 * @eventType com.adobe.protocols.oauth2.event.GetAuthorizationCodeEvent.TYPE
+	 *
+	 * @see #getAuthorizationCode()
+	 * @see com.adobe.protocols.oauth2.event.GetAuthorizationCodeEvent
+	 */
+	[Event(name="getAuthorizationCode", type="com.adobe.protocols.oauth2.event.GetAuthorizationCodeEvent")]
+
 	/**
 	 * Utility class the encapsulates APIs for interaction with an OAuth 2.0 server.
 	 * Implemented against the OAuth 2.0 v2.15 specification.
@@ -111,6 +122,91 @@ package com.adobe.protocols.oauth2
 				getAccessTokenWithResourceOwnerCredentialsGrant(grantType as ResourceOwnerCredentialsGrant);
 			}  // else-if statement
 		}  // getAccessToken
+
+		/**
+		 *
+		 * @param authorizationCodeGrant
+		 */
+		public function getAuthorizationCode(authorizationCodeGrant: AuthorizationCodeGrant): void {
+			var getAuthorizationCodeEvent: GetAuthorizationCodeEvent = new GetAuthorizationCodeEvent();
+
+			doGetAuthorizationCodeWith(authorizationCodeGrant, function(code: String): void {
+				getAuthorizationCodeEvent.code = code;
+				dispatchEvent(getAuthorizationCodeEvent);
+			}, function(errorCode: String, errorMessage: String): void {
+				getAuthorizationCodeEvent.errorCode = errorCode;
+				getAuthorizationCodeEvent.errorMessage = errorMessage;
+				dispatchEvent(getAuthorizationCodeEvent);
+			});
+		}
+
+		protected function doGetAuthorizationCodeWith(authorizationCodeGrant: AuthorizationCodeGrant, resultCallback: Function, errorCallback: Function): void {
+
+			authorizationCodeGrant.stageWebView.addEventListener(LocationChangeEvent.LOCATION_CHANGING, onLocationChanging);
+			authorizationCodeGrant.stageWebView.addEventListener(LocationChangeEvent.LOCATION_CHANGE, onLocationChanging);
+			authorizationCodeGrant.stageWebView.addEventListener(Event.COMPLETE, onStageWebViewComplete);
+			authorizationCodeGrant.stageWebView.addEventListener(ErrorEvent.ERROR, onStageWebViewError);
+
+			var startTime:Number = new Date().time;
+			log.info("Loading auth URL: " + authorizationCodeGrant.getFullAuthUrl(authEndpoint));
+			authorizationCodeGrant.stageWebView.loadURL(authorizationCodeGrant.getFullAuthUrl(authEndpoint));
+
+			function onLocationChanging(locationChangeEvent: LocationChangeEvent): void {
+				log.info("Loading URL: " + locationChangeEvent.location);
+				if (checkRedirectURI(locationChangeEvent.location, authorizationCodeGrant.redirectUri) && locationChangeEvent.location.indexOf(OAuth2Const.RESPONSE_PROPERTY_AUTHORIZATION_CODE) > 0) {
+					log.info("Redirect URI encountered (" + authorizationCodeGrant.redirectUri + ").  Extracting values from path.");
+
+					// stop event from propogating
+					locationChangeEvent.preventDefault();
+
+					var queryParams:Object = extractQueryParams(locationChangeEvent.location);
+					var code:String = queryParams.code;
+					if (code != null) {
+						log.debug("Authorization code: " + code);
+						resultCallback(code);
+					} else {
+						log.error("Error encountered during authorization request");
+						errorCallback(queryParams.error, queryParams.error_description);
+					}
+				}
+			}
+
+			function onStageWebViewComplete(event:Event):void {
+				// Note: Special provision made particularly for Google OAuth 2 implementation for installed
+				//       applications.  Particularly, when we see a certain redirect URI, we must look for the authorization
+				//       code in the page title as opposed to in the URL.  See https://developers.google.com/accounts/docs/OAuth2InstalledApp#choosingredirecturi
+				//       for more information.
+				if (authorizationCodeGrant.redirectUri == OAuth2Const.GOOGLE_INSTALLED_APPLICATION_REDIRECT_URI && event.currentTarget.title.indexOf(OAuth2Const.RESPONSE_TYPE_AUTHORIZATION_CODE) > 0) {
+					var codeString:String = event.currentTarget.title.substring(event.currentTarget.title.indexOf(OAuth2Const.RESPONSE_TYPE_AUTHORIZATION_CODE));
+					var code:String = codeString.split("=")[1];
+					log.debug("Authorization code extracted from page title: " + code);
+					resultCallback(code);
+				} else {
+					log.info("Auth URL loading complete after " + (new Date().time - startTime) + "ms");
+				}
+			}
+
+			function onStageWebViewError(errorEvent: ErrorEvent): void {
+				log.error("Error occurred with StageWebView: " + errorEvent);
+				errorCallback("STAGE_WEB_VIEW_ERROR:" + errorEvent.errorID, errorEvent.text);
+			}
+		}
+
+		// MARK: RedirectURI checker
+
+		protected static const defaultCheckRedirectURI: Function = function(location: String, redirectURI: String): Boolean {
+			return location.indexOf(redirectURI) == 0;
+		};
+
+		protected var _checkRedirectURI: Function = null;
+		public function setCheckRedirectURI(checker: Function): void {
+			_checkRedirectURI = checker;
+		}
+		protected function get checkRedirectURI(): Function {
+			return  _checkRedirectURI || defaultCheckRedirectURI;
+		}
+
+		// MARK: Refresh Access Token
 		
 		/**
 		 * Initiates request to refresh a given access token.  Upon completion, will dispatch
